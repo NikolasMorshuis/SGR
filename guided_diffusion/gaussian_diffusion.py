@@ -544,12 +544,25 @@ class GaussianDiffusion:
         cond_fn=None,
         model_kwargs=None,
         eta=0.0,
+        kspace_us=None,
+        mask=None,
+        A=None,
+        seg_model=None,
+        seg_loss=None,
+        div_const=0.0,
+        full_dc=True,
+        specific_class=None,
+        just_sample=False,
     ):
         """
         Sample x_{t-1} from the model using DDIM.
 
         Same usage as p_sample().
         """
+        x = x.detach()
+        x.requires_grad = True
+        applied_grad = th.zeros_like(x)
+
         out = self.p_mean_variance(
             model,
             x,
@@ -572,17 +585,83 @@ class GaussianDiffusion:
             * th.sqrt((1 - alpha_bar_prev) / (1 - alpha_bar))
             * th.sqrt(1 - alpha_bar / alpha_bar_prev)
         )
-        # Equation 12.
-        noise = th.randn_like(x)
-        mean_pred = (
-            out["pred_xstart"] * th.sqrt(alpha_bar_prev)
-            + th.sqrt(1 - alpha_bar_prev - sigma ** 2) * eps
+
+        c1 = (
+            eta
+            * th.sqrt((1 - alpha_bar_prev) / (1 - alpha_bar))
+            * th.sqrt(1 - alpha_bar / alpha_bar_prev)
         )
-        nonzero_mask = (
-            (t != 0).float().view(-1, *([1] * (len(x.shape) - 1)))
-        )  # no noise when t == 0
-        sample = mean_pred + nonzero_mask * sigma * noise
-        return {"sample": sample, "pred_xstart": out["pred_xstart"]}
+        c2 = th.sqrt(1 - alpha_bar_prev - c1 ** 2)
+
+        noise = th.randn_like(x)
+
+        mean_pred = out['pred_xstart']
+        if kspace_us.shape[2] != mean_pred.shape[-1]:
+            different_size = True
+            mean_pred_orig = mean_pred.clone()
+            width_diff = mean_pred.shape[-1] - kspace_us.shape[2]
+            if width_diff%2 == 0:
+                mean_pred = mean_pred[:,:,:, width_diff//2:-width_diff//2]
+                mean_pred_orig[:, :, :, width_diff // 2:-width_diff // 2] = mean_pred
+            else:
+                mean_pred = mean_pred[:,:,:, width_diff//2:-width_diff//2-1]
+                mean_pred_orig[:, :, :, width_diff // 2:-width_diff // 2 - 1] = mean_pred
+            mean_pred = mean_pred_orig
+
+        # real to complex:
+        mean_pred = th.complex(mean_pred[:, 0].double(), mean_pred[:, 1].double())
+
+        if t[0].item() == 0 and full_dc:
+            pred_kspace = A._forward_op(mean_pred)
+            pred_kspace = th.where(kspace_us != 0, kspace_us, pred_kspace)
+            mean_pred = A._adjoint_op(pred_kspace)
+            rsold = 0
+        elif t[0].item() == 0 and not full_dc:
+            rsold = 0
+        else:
+            # calculate gradient
+            mean_pred, rsold = A.CG(kspace_us, mean_pred, mask, max_iter=2)
+
+        mean_pred_abs = mean_pred.unsqueeze(1).abs().float()
+
+        if seg_model is not None and not just_sample and t[0].item() != 0:
+            with th.enable_grad():
+                batch_size = mean_pred.shape[0]
+                mean_seg = seg_model(mean_pred_abs)
+                loss_lower = seg_loss(mean_seg[:batch_size // 2], kind='lowerbound', specific_class=specific_class)
+                loss_upper = seg_loss(mean_seg[batch_size // 2:], kind='upperbound', specific_class=specific_class)
+
+                loss = loss_lower + loss_upper
+
+                grad = th.autograd.grad(loss, x)[0]
+
+                norm_lower = th.linalg.norm(grad[0])
+                norm_upper = th.linalg.norm(grad[1])
+
+                eps_norm = th.linalg.norm(noise[0])
+                applied_grad = th.zeros_like(x)
+                if th.is_tensor(grad) and t[0] > 0:
+                    if norm_lower > div_const * eps_norm:
+                        applied_grad[0] = grad[0] / (norm_lower + 1e-8) * div_const * eps_norm
+                    else:
+                        applied_grad[0] = grad[0]
+                    if norm_upper > div_const * eps_norm:
+                        applied_grad[1] = grad[1] / (norm_upper + 1e-8) * div_const * eps_norm
+                    else:
+                        applied_grad[1] = grad[1]
+
+        # complex to real:
+        mean_pred = th.stack([mean_pred.real, mean_pred.imag], dim=1)
+        mean_pred = mean_pred.float()
+        sample = (alpha_bar_prev.sqrt() * mean_pred + c1 * noise + c2 * (eps + applied_grad))
+
+        sample = sample.detach()
+
+        if not isinstance(rsold, int):
+            rsold = rsold.detach()
+
+        return {"sample": sample, "pred_xstart": out["pred_xstart"].detach(), "rsold": rsold,
+                "mean_pred_abs": mean_pred_abs.detach()}
 
     def ddim_reverse_sample(
         self,
@@ -633,7 +712,16 @@ class GaussianDiffusion:
         model_kwargs=None,
         device=None,
         progress=False,
-        eta=0.0,
+        eta=1.0,
+        kspace_us=None,
+        mask=None,
+        seg_model=None,
+        seg_loss=None,
+        div_const=0.0,
+        full_dc=True,
+        specific_class=None,
+        just_sample=False,
+        A=None,
     ):
         """
         Generate samples from the model using DDIM.
@@ -652,6 +740,15 @@ class GaussianDiffusion:
             device=device,
             progress=progress,
             eta=eta,
+            kspace_us=kspace_us,
+            mask=mask,
+            seg_model=seg_model,
+            seg_loss=seg_loss,
+            div_const=div_const,
+            full_dc=full_dc,
+            specific_class=specific_class,
+            just_sample=just_sample,
+            A=A,
         ):
             final = sample
         return final["sample"]
@@ -668,6 +765,15 @@ class GaussianDiffusion:
         device=None,
         progress=False,
         eta=0.0,
+        kspace_us=None,
+        mask=None,
+        seg_model=None,
+        seg_loss=None,
+        div_const=0.0,
+        full_dc=True,
+        specific_class=None,
+        just_sample=False,
+        A=None,
     ):
         """
         Use DDIM to sample from the model and yield intermediate samples from
@@ -692,17 +798,50 @@ class GaussianDiffusion:
 
         for i in indices:
             t = th.tensor([i] * shape[0], device=device)
-            with th.no_grad():
-                out = self.ddim_sample(
-                    model,
-                    img,
-                    t,
-                    clip_denoised=clip_denoised,
-                    denoised_fn=denoised_fn,
-                    cond_fn=cond_fn,
-                    model_kwargs=model_kwargs,
-                    eta=eta,
-                )
+            if not just_sample:
+                with th.enable_grad():
+                    out = self.ddim_sample(
+                        model,
+                        img,
+                        t,
+                        clip_denoised=clip_denoised,
+                        denoised_fn=denoised_fn,
+                        cond_fn=cond_fn,
+                        model_kwargs=model_kwargs,
+                        eta=eta,
+                        kspace_us=kspace_us,
+                        mask=mask,
+                        A=A,
+                        seg_model=seg_model,
+                        seg_loss=seg_loss,
+                        div_const=div_const,
+                        full_dc=full_dc,
+                        specific_class=specific_class,
+                        just_sample=just_sample,
+                    )
+                yield out
+                img = out["sample"]
+            else:
+                with th.no_grad():
+                    out = self.ddim_sample(
+                        model,
+                        img,
+                        t,
+                        clip_denoised=clip_denoised,
+                        denoised_fn=denoised_fn,
+                        cond_fn=cond_fn,
+                        model_kwargs=model_kwargs,
+                        eta=eta,
+                        kspace_us=kspace_us,
+                        mask=mask,
+                        A=A,
+                        seg_model=seg_model,
+                        seg_loss=seg_loss,
+                        div_const=div_const,
+                        full_dc=full_dc,
+                        specific_class=specific_class,
+                        just_sample=just_sample,
+                    )
                 yield out
                 img = out["sample"]
 

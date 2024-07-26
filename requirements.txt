@@ -1,0 +1,15 @@
+torch~=2.2.2
+numpy~=1.23.5
+h5py~=3.11.0
+matplotlib~=3.9.1
+dosma~=0.1.2
+meddlr~=0.0.9
+pandas~=2.2.2
+monai~=1.3.0
+blobfile~=2.1.1
+lmdb~=1.4.1
+pillow~=10.4.0
+setuptools~=69.5.1
+requests~=2.32.3
+scipy~=1.13.1
+tqdm~=4.66.4

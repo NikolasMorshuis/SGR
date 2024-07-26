@@ -8,9 +8,8 @@ import os
 
 import numpy as np
 import torch as th
-import torch.distributed as dist
 
-from guided_diffusion import dist_util, logger
+from guided_diffusion import logger
 from guided_diffusion.script_util import (
     NUM_CLASSES,
     model_and_diffusion_defaults,
@@ -18,89 +17,181 @@ from guided_diffusion.script_util import (
     add_dict_to_argparser,
     args_to_dict,
 )
+from skm.mri import LogLossPlus2, SenseModel
+from skm.skm_utils import GetMRI
+
+from utils.model_wrapper import UNet_Wrapper
+import monai
+import pandas as pd
 
 
 def main():
     args = create_argparser().parse_args()
 
-    dist_util.setup_dist()
+    assert args.split in ['train', 'val', 'test'], 'split should be either train, val or test'
     logger.configure()
-
     logger.log("creating model and diffusion...")
     model, diffusion = create_model_and_diffusion(
         **args_to_dict(args, model_and_diffusion_defaults().keys())
     )
     model.load_state_dict(
-        dist_util.load_state_dict(args.model_path, map_location="cpu")
+        th.load(args.model_path, map_location="cpu")
     )
-    model.to(dist_util.dev())
+    model.cuda()
     if args.use_fp16:
         model.convert_to_fp16()
     model.eval()
 
+    div_const = args.div_const
+    seg_loss = LogLossPlus2()
+
+    if args.just_sample:
+        save_dir = os.path.join(args.save_base_dir, f'just_sample_{args.just_sample}', f'{args.split}', f'acc_{args.acc}',
+                                'save_16')
+    else:
+        save_dir = os.path.join(args.save_base_dir, f'just_sample_{args.just_sample}', f'{args.split}', f'acc_{args.acc}',
+                                f'div_{div_const}')
+    if not os.path.exists(save_dir) and not args.debug:
+        os.makedirs(save_dir)
+
+    include_segmentation = True
+    if include_segmentation:
+        seg_model = monai.networks.nets.UNet(
+            spatial_dims=2,
+            in_channels=1,
+            out_channels=5,
+            channels=(16, 32, 64, 128, 256),
+            strides=(2, 2, 2, 2),
+            num_res_units=2,
+        )
+        seg_model.load_state_dict(th.load(
+            args.segmentation_model_path))
+        seg_model.cuda()
+        seg_model.eval()
+        seg_model = UNet_Wrapper(seg_model, add_noise=True)
+    else:
+        seg_model = None
+
+    MRIs = GetMRI(normalize=True, split=args.split, acc=args.acc, filter_slices=None)
+    # Optional: filter for slices with segmentations:
+    selection_df = pd.read_csv('utils/label_distribution_test.csv', index_col=0)
+    # create column which is a sum of all classes:
+    selection_df['sum_segs'] = selection_df['1'] + selection_df['2'] + selection_df['3'] + selection_df['4']
+    selection_df = selection_df[selection_df['sum_segs'] > 0]
+    selection = selection_df['label'].values
+    selection = np.sort(selection)
+    MRIs = th.utils.data.Subset(MRIs, selection)
+
     logger.log("sampling...")
-    all_images = []
-    all_labels = []
-    while len(all_images) * args.batch_size < args.num_samples:
-        model_kwargs = {}
-        if args.class_cond:
-            classes = th.randint(
-                low=0, high=NUM_CLASSES, size=(args.batch_size,), device=dist_util.dev()
-            )
-            model_kwargs["y"] = classes
-        sample_fn = (
-            diffusion.p_sample_loop if not args.use_ddim else diffusion.ddim_sample_loop
-        )
-        sample = sample_fn(
-            model,
-            (args.batch_size, 3, args.image_size, args.image_size),
-            clip_denoised=args.clip_denoised,
-            model_kwargs=model_kwargs,
-        )
-        sample = ((sample + 1) * 127.5).clamp(0, 255).to(th.uint8)
-        sample = sample.permute(0, 2, 3, 1)
-        sample = sample.contiguous()
+    num_channels = 2
+    for j in range(len(MRIs)):
+        kspace, kspace_us, maps, mask, target, segmentation, norm_constant, scan_name = MRIs.__getitem__(j)
+        kspace = kspace.cuda().unsqueeze(0)
+        kspace_us = kspace_us.cuda().unsqueeze(0)
+        maps = maps.cuda().unsqueeze(0)
+        mask = mask.cuda().unsqueeze(0)
+        target = target.cuda().unsqueeze(0)
+        A = SenseModel(maps)
 
-        gathered_samples = [th.zeros_like(sample) for _ in range(dist.get_world_size())]
-        dist.all_gather(gathered_samples, sample)  # gather not supported with NCCL
-        all_images.extend([sample.cpu().numpy() for sample in gathered_samples])
-        if args.class_cond:
-            gathered_labels = [
-                th.zeros_like(classes) for _ in range(dist.get_world_size())
-            ]
-            dist.all_gather(gathered_labels, classes)
-            all_labels.extend([labels.cpu().numpy() for labels in gathered_labels])
-        logger.log(f"created {len(all_images) * args.batch_size} samples")
+        sampled_image_array = []
+        seg_array = []
+        class_array = []
 
-    arr = np.concatenate(all_images, axis=0)
-    arr = arr[: args.num_samples]
-    if args.class_cond:
-        label_arr = np.concatenate(all_labels, axis=0)
-        label_arr = label_arr[: args.num_samples]
-    if dist.get_rank() == 0:
-        shape_str = "x".join([str(x) for x in arr.shape])
-        out_path = os.path.join(logger.get_dir(), f"samples_{shape_str}.npz")
-        logger.log(f"saving to {out_path}")
-        if args.class_cond:
-            np.savez(out_path, arr, label_arr)
+        if args.just_sample:
+            specific_classes = th.tensor(np.arange(1))
         else:
-            np.savez(out_path, arr)
+            specific_classes = th.tensor(np.arange(5))[1:]
 
-    dist.barrier()
-    logger.log("sampling complete")
+        for c, specific_class in enumerate(specific_classes):
+            if args.just_sample:
+                just_sample_here = True
+                batch_size_here = 16
+            else:
+                just_sample_here = False
+                batch_size_here = args.batch_size
+            class_array += [specific_class]*batch_size_here
+            specific_class = int(specific_class.item())
+
+            model_kwargs = {}
+
+            sample_fn = (
+                diffusion.p_sample_loop if not args.use_ddim else diffusion.ddim_sample_loop
+            )
+            sample = sample_fn(
+                model,
+                (batch_size_here, num_channels , 512, 160),
+                clip_denoised=args.clip_denoised,
+                model_kwargs=model_kwargs,
+                kspace_us=kspace_us,
+                mask=mask,
+                target=target,
+                seg_model=seg_model,
+                seg_loss=seg_loss,
+                div_const=div_const,
+                specific_class=specific_class,
+                just_sample=just_sample_here,
+                A=A,
+            )
+
+            with th.no_grad():
+                fully_sampled_seg = seg_model(target.abs())
+                fully_sampled_seg = fully_sampled_seg.argmax(1)
+                full_image = A(kspace, adjoint=True).abs()[0].cpu()
+                orig_image = A(kspace_us, adjoint=True).abs()[0].cpu()
+                sampled_image = th.complex(sample[:, 0], sample[:, 1]).abs()
+                sampled_image = sampled_image.unsqueeze(1)
+                sampled_image_array.append(sampled_image)
+
+                output = seg_model(sampled_image)
+                output_prob = th.nn.functional.softmax(output, dim=1)
+                output_seg = output_prob.argmax(1)
+                seg_array.append(output_seg)
+
+        sampled_image_array = th.cat(sampled_image_array, dim=0)
+        seg_array = th.cat(seg_array, dim=0)
+        class_array = th.tensor(class_array)
+
+        if not args.debug:
+            th.save({'arr': sampled_image_array,
+                     'perturbed_image': orig_image.unsqueeze(0).unsqueeze(0).float(),
+                     'x_orig': full_image.unsqueeze(0).unsqueeze(0).float(),
+                     'segmentations': seg_array.cpu().unsqueeze(1).type(th.uint8),
+                     'fully_sampled_seg': fully_sampled_seg[0].cpu().unsqueeze(0).unsqueeze(0).type(th.uint8),
+                     'class_array': class_array,
+                     'scan_name': scan_name,
+                     'norm_constant': norm_constant}, f'{save_dir}/{scan_name}_{j:04d}.pth')
+            logger.log(f'Saved {scan_name}_{j:04d}.pth')
+
+    logger.log("done")
 
 
 def create_argparser():
     defaults = dict(
         clip_denoised=True,
         num_samples=10000,
-        batch_size=16,
-        use_ddim=False,
-        model_path="",
+        batch_size=4,
+        num_channels=2,
+        use_ddim=True,
+        model_path="models/model1000000.pt",
+        segmentation_model_path="models/model_segmentation.pt"
     )
     defaults.update(model_and_diffusion_defaults())
     parser = argparse.ArgumentParser()
     add_dict_to_argparser(parser, defaults)
+    acceleration = {'acc': 16.0}
+    add_dict_to_argparser(parser, acceleration)
+    split = {'split': 'test'}
+    add_dict_to_argparser(parser, split)
+    plot = {'plot': False}
+    add_dict_to_argparser(parser, plot)
+    just_sample = {'just_sample': False}
+    add_dict_to_argparser(parser, just_sample)
+    debug = {'debug': False}
+    add_dict_to_argparser(parser, debug)
+    div_const = {'div_const': 1000.0}
+    add_dict_to_argparser(parser, div_const)
+    save_base_dir = {'save_base_dir': './results/skm'}
+    add_dict_to_argparser(parser, save_base_dir)
     return parser
 
 
