@@ -4,6 +4,9 @@ This is the codebase for the paper [Segmentation-guided MRI reconstruction for m
 
 It is based on [openai/guided-diffusion](https://github.com/openai/guided-diffusion)
 
+Image:
+![TeaserFigure](assets/Teaser_Fig_poster.png)
+
 ## Installation
 
 Clone the repository:
@@ -72,7 +75,7 @@ python scripts/image_sample.py --model_path models/model1000000.pt --attention_r
 
 If you find this code useful, please consider citing:
 ```bibtex
-@misc{morshuis2024segmentationguidedmrireconstructionmeaningfully,
+@misc{morshuis2024segmentationguidedmri,
       title={Segmentation-guided MRI reconstruction for meaningfully diverse reconstructions}, 
       author={Jan Nikolas Morshuis and Matthias Hein and Christian F. Baumgartner},
       year={2024},
