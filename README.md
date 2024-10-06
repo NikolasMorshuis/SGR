@@ -44,7 +44,7 @@ wget https://nc.mlcloud.uni-tuebingen.de/index.php/s/XSmbFWA2tQFxe2Q/download/mo
 wget https://nc.mlcloud.uni-tuebingen.de/index.php/s/dX6Y4M2wsRZadWg/download/model1000000.pt -P ./models/
 ```
 
-There are two methods to get access to the dataset: You can either use the small dataset, which is accessible via Huggingface,
+There are two methods to get access to the SKM-TEA dataset: You can either use the smaller skm-tea-mini dataset, which is accessible via [Huggingface](https://huggingface.co/datasets/arjundd/skm-tea-mini),
 or you can download the full dataset from the [official instructions](https://github.com/StanfordMIMI/skm-tea/blob/main/DATASET.md). Note that the size of the complete dataset is 1.6TB.
 
 Once downloaded, you need to set an environment variable that points to the dataset directory.:
