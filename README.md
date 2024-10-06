@@ -35,13 +35,26 @@ Download the models from these links and put them into the models folder:
 
 [diffusion model](https://nc.mlcloud.uni-tuebingen.de/index.php/s/dX6Y4M2wsRZadWg)
 
-You need to download the skm-tea dataset, following the [official instructions](https://github.com/StanfordMIMI/skm-tea/blob/main/DATASET.md).
-Note that the size of the complete dataset is 1.6TB.
+You can do this by using the following commands:
+
+```bash
+wget https://nc.mlcloud.uni-tuebingen.de/index.php/s/XSmbFWA2tQFxe2Q/download/model_segmentation.pt -P ./models/
+wget https://nc.mlcloud.uni-tuebingen.de/index.php/s/dX6Y4M2wsRZadWg/download/model1000000.pt -P ./models/
+```
+
+There are two methods to get access to the dataset: You can either use the small dataset, which is accessible via Huggingface,
+or you can download the full dataset from the [official instructions](https://github.com/StanfordMIMI/skm-tea/blob/main/DATASET.md). Note that the size of the complete dataset is 1.6TB.
 
 Once downloaded, you need to set an environment variable that points to the dataset directory.:
 
 ```bash
 export MEDDLR_DATASETS_DIR=/path/to/SKM-TEA
+```
+
+You will also have to make sure that the current directory is included in the python path:
+
+```bash
+export PYTHONPATH=$PYTHONPATH:/path/to/this/repo
 ```
 
 You can then start generating diverse samples using Segmentation-Guided Reconstruction (SGR) with the following command:

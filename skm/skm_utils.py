@@ -126,9 +126,6 @@ class GetMRI(torch.utils.data.Dataset):
         Echo is not yet implemented, we always focus on echo1
         normalize: divide by 99th percentile
         """
-        dataset_dicts_train = DatasetCatalog.get("skmtea_v1_train")
-        dataset_dicts_val = DatasetCatalog.get("skmtea_v1_val")
-        dataset_dicts_test = DatasetCatalog.get("skmtea_v1_test")
         self.split = split
         self.acc = acc
         self.echo = echo
@@ -141,10 +138,13 @@ class GetMRI(torch.utils.data.Dataset):
         else:
             self.slices_per_patient = filter_slices[1] - filter_slices[0]
         if split == 'train':
+            dataset_dicts_train = DatasetCatalog.get("skmtea_v1_train")
             self.dataset_dicts = dataset_dicts_train
         elif split == 'val':
+            dataset_dicts_val = DatasetCatalog.get("skmtea_v1_val")
             self.dataset_dicts = dataset_dicts_val
         elif split == 'test':
+            dataset_dicts_test = DatasetCatalog.get("skmtea_v1_test")
             self.dataset_dicts = dataset_dicts_test
 
     def __len__(self):

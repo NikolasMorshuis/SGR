@@ -17,6 +17,8 @@ from guided_diffusion.script_util import (
     add_dict_to_argparser,
     args_to_dict,
 )
+import skm_tea as st
+
 from skm.mri import LogLossPlus2, SenseModel
 from skm.skm_utils import GetMRI
 
@@ -74,7 +76,7 @@ def main():
 
     MRIs = GetMRI(normalize=True, split=args.split, acc=args.acc, filter_slices=None)
     # Optional: filter for slices with segmentations:
-    selection_df = pd.read_csv('utils/label_distribution_test.csv', index_col=0)
+    selection_df = pd.read_csv(f'utils/label_distribution_{args.split}.csv', index_col=0)
     # create column which is a sum of all classes:
     selection_df['sum_segs'] = selection_df['1'] + selection_df['2'] + selection_df['3'] + selection_df['4']
     selection_df = selection_df[selection_df['sum_segs'] > 0]
@@ -124,7 +126,6 @@ def main():
                 model_kwargs=model_kwargs,
                 kspace_us=kspace_us,
                 mask=mask,
-                target=target,
                 seg_model=seg_model,
                 seg_loss=seg_loss,
                 div_const=div_const,
