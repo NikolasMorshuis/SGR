@@ -1,11 +1,10 @@
 # Segmentation-Guided MRI Reconstruction
 
+![TeaserFigure](assets/Teaser_Fig_poster.png)
+
 This is the codebase for the paper [Segmentation-guided MRI reconstruction for meaningfully diverse reconstructions](https://arxiv.org/pdf/2407.18026)
 
 It is based on [openai/guided-diffusion](https://github.com/openai/guided-diffusion)
-
-Image:
-![TeaserFigure](assets/Teaser_Fig_poster.png)
 
 ## Installation
 
